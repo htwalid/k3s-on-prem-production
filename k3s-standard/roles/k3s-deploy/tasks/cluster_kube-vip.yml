@@ -1,0 +1,87 @@
+---
+
+- name: Install kube-vip
+  package:
+    name: kube-vip
+    state: present
+
+- name: Download kube-vip RBAC file
+  get_url:
+    url: https://kube-vip.io/manifests/rbac.yaml
+    dest: "{{ k3s_watchdir }}/kube-vip-rbac.yaml"
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Deploying kube-vip
+  shell: |
+    ctr --namespace k8s.io image pull "{{ kube_vip_image }}":"{{ kube_vip_image_tag }}"
+    ctr --namespace k8s.io run --rm --net-host "{{ kube_vip_image }}":"{{ kube_vip_image_tag }}" vip /kube-vip \
+    manifest daemonset \
+    --arp \
+    --interface "{{ kube_vip_interface }}" \
+    --address "{{ kube_vip_ip }}" \
+    --controlplane \
+    --leaderElection \
+    --taint \
+    --services \
+    --inCluster | tee "{{ k3s_watchdir }}/kube-vip.yaml"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+- name: Set sysctl variables
+  sysctl:
+    ignoreerrors: yes
+    name: '{{ item.name }}'
+    reload: yes
+    state: present
+    sysctl_set: yes
+    value: '{{ item.value }}'
+  with_items:
+    - {name: net.ipv4.ip_nonlocal_bind, value: 1}
+
+- name: Configure keepalived
+  template:
+    src: keepalived/keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: 'root'
+    group: 'root'
+    mode: '0600'
+  register: keepalived_service
+
+- name: Stop keepalived Service
+  systemd:
+    name: keepalived
+    daemon_reload: yes
+    enabled: yes
+    state: stopped
+  when: keepalived_service.changed
+
+- name: Enable keepalived Service
+  systemd:
+    name: keepalived
+    daemon_reload: yes
+    enabled: yes
+    state: started
+
+- name: Wait for HA ip to come up
+  command: |
+    ping -c 1 -w 1 {{ keepalived_ip }}
+  register: ping
+  until:
+    - ping.rc == 0
+  retries: 30
+  delay: 5
+  run_once: yes
+  changed_when: no
